@@ -1,0 +1,13 @@
+[Unit]
+Description=LANDNS receiver
+After=network.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=forking
+Restart=always
+ExecStart=/usr/bin/tellme
+IgnoreSIGPIPE=false
+

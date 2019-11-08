@@ -1,0 +1,152 @@
+#! /usr/bin/perl -w
+use strict;
+use IO::Socket; # so we can hear those broadcasts by tellem
+use POSIX; # big honkin module, but we need some of it
+
+#daemon to update /etc/hosts (eventually)
+
+
+# *********** globals
+my $time_to_die = 0; # shutdown cleanly
+my $pid; # for daemonizing
+
+my $debug = 0; # turns printing on and off
+my $msgsock; # the socket
+my ($rin,$rout,$rgood); # vectors for select func
+my $portno = 53831; # birthday port
+my $maxtoread = 256; # arbitrary max length
+my $them; # their IP from recv?
+my $msg;  # the incoming message
+my %nameIP;
+my %nameTime;
+my ($hisname,$hisIP,$hisTime);
+my $myname; # so I can exclude myself, use more efficient 127.0.1.1
+my ($key,$value); # used with hashes
+my $changed = 0; # any change should set this so we make a new hosts file
+
+#**************************************** subs
+sub getmyname()
+{
+ open (MYNAME, "hostname |") or die "Can't run hostname utility: $!";
+ $myname = <MYNAME>; # note, chomp to get rid of /n
+ chomp $myname;
+ close (MYNAME) or die "Can't close hostname utility: $!";
+}
+#****************************************
+sub printhashes()
+{
+ return unless $debug; # for being a daemon, we can't print
+ print ("*hashes*******************************************changed:$changed\n");
+ while (($key,$value) = each(%nameIP))
+ {
+  print "name:$key\tIP:$value\ttime:$nameTime{$key}\n"; 
+ }
+
+}
+#****************************************
+ sub populateHashes
+ {
+  my $msg = shift;
+ ($hisIP,$hisname) = split /\s+/,$msg;
+ unless (exists $nameIP{$hisname})  {$nameIP{$hisname} = "0";} # force exist
+ unless ($nameIP{$hisname} eq $hisIP) {$changed++;} # flag additions
+ $nameIP{$hisname} = $hisIP; # populate hash for hosts
+ $nameTime{$hisname} = time; # since epoch, seconds
+ 
+ }
+#****************************************
+sub cleanhashes
+{ # delete any entries too old (a machine went offline?)
+ my $now = time; # current time
+ while (($key,$value) = each(%nameTime))
+ {
+  if ($now - $value > 120) # too old, machine hasn't sent us a msg lately 
+  {
+   delete($nameTime{$key});
+   delete($nameIP{$key});
+   $changed++; # tell world something changed
+   print "\nremoving $key from tables\n" if $debug;
+  }
+ }
+}
+#****************************************
+sub handlechange
+{ # where we do scary stuff like rewrite /etc/hosts
+ my $filecontent = "127.0.0.1\tlocalhost\n127.0.1.1\t$myname\n"; # for starters
+ while (($key,$value) = each %nameIP)
+ {
+  unless ($key eq $myname) # don't dupe the faster loopback name/addr
+  {
+   $filecontent .= "$value\t$key\n";
+  }
+ }
+
+ $filecontent .= <<IPV6; # more stuff from default original file
+# for the synology share that can't run this junk:
+192.168.1.240   synshare 
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+ff02::3 ip6-allhosts
+
+IPV6
+ print ("\nhandlechange:\n$filecontent") if $debug;
+ open(HOSTS, "> /etc/hosts") or die "couldn't open /etc/hosts:$!";
+ print (HOSTS "$filecontent"); 
+ close (HOSTS);
+ $changed = 0; # we are now consistent with /etc/hosts (we hope)
+}
+#****************************************
+#****************************************
+sub signal_handler 
+{ 
+ $time_to_die = 1; 
+}
+#************** main
+setpgrp(0,0); # try to be as rooty as we can be
+$pid = fork(); # we're going to detach from whoever started us
+exit if $pid; # parent dies
+die "Couldn't fork: $!" unless defined($pid);
+POSIX::setsid() or die "Can't start new session: $!";
+close (STDIN); # never use it anyway
+close (STDOUT) unless $debug;
+close (STDERR) unless $debug;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+getmyname(); # need my own machine name
+$msgsock = IO::Socket::INET->new(LocalPort => $portno, Proto => "udp")
+ 									or die ("couldn't bind to port:$!");
+$rin = '';
+vec ($rin, fileno($msgsock),1) = 1;
+
+print ("waiting for message\n") if $debug;
+
+until ($time_to_die)
+{
+ $them = select($rout=$rin,undef,undef,10);
+ if ($them) # we have a message
+ {
+  $them = $msgsock->recv($msg,$maxtoread);
+  print ("\nmessage received:$msg\n") if $debug;
+  populateHashes($msg);
+  cleanhashes; # remove offline machines
+  printhashes();
+ 
+ } else # no message in timeout, do *some* stuff anyway.
+ {
+  print "." if $debug;
+  cleanhashes; # remove any offline machines in timely fashion
+ }
+ handlechange if $changed; # go update /etc/hosts
+}
+
+
+
+__END__
+
+
+
+

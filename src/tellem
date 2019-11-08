@@ -1,0 +1,94 @@
+#! /usr/bin/perl -w
+use strict;
+use Socket; # so we can broadcast on udp
+use POSIX;
+
+# A deamon to broadcast our name/ip info once in awhile.
+# Some other daemon will be listening and updating its /etc/hosts as required
+
+#****************************************globals
+my $time_to_die = 0; # shutdown cleanly
+my $pid; # for daemonizing
+my @IPs; # for multihomed hosts, just broadcast one
+my $debug = 0; # don't print if daemonized
+my $name; # my name on the ethernet
+my $ipaddr; # my ip on the lan
+my $msgsock; # the socket
+my $portno = 53831; # birthday port-y
+my $dest = sockaddr_in($portno, inet_aton("192.168.1.255"));
+my $msg; # what I'm going to broadcast
+
+#****************************************
+sub loggit
+{
+ my $msg = shift;
+ my $now = scalar localtime();
+ $msg = "oops: " unless $msg;
+ print LOG "$now: $msg :$!\n";
+}
+
+#****************************************
+sub mynetinfo ()
+{
+# some of this is easier, some harder than for the other machines on the net
+ open (MYNAME, "hostname |") or die "Can't run hostname utility: $!";
+ $name = <MYNAME>; # note, chomp to get rid of /n
+ chomp $name;
+ close (MYNAME) or die "Can't close hostname utility: $!";
+ 
+ open (MYIP, "hostname -I |") or die "Can't run hostname -I:$!";
+ $ipaddr = <MYIP>;
+ close (MYIP) or loggit ("Can't close hostname -I"); 
+ @IPs = split /\s+/, $ipaddr; # might be more than one
+ print LOG "IPs:@IPs\n" if $debug;
+ 
+foreach (@IPs)
+ {
+  $ipaddr = $_;
+#  print LOG "ipaddr:$ipaddr\n" if $debug;
+  last if ($ipaddr =~ /192.168.1/);
+ }
+# print LOG "ipaddr after loop:$ipaddr\n" if $debug;
+ chomp $ipaddr;
+ 
+ $msg = "$ipaddr $name";
+}
+#****************************************
+sub setupsock()
+{
+ socket($msgsock,PF_INET,SOCK_DGRAM,getprotobyname("udp")) or loggit ("socket:");
+ setsockopt($msgsock, SOL_SOCKET, SO_BROADCAST,1) or loggit ("setsockopt:");
+}
+#****************************************
+sub signal_handler 
+{ 
+ $time_to_die = 1; 
+# print LOG "Killed by sig\n" if $debug;
+}
+########################### main
+#if ($debug) 
+#{
+ open (LOG, ">> /tmp/tellem.log") or die "couldn't open logfile";
+ $! = "";
+ loggit ("started\n");
+#}
+$pid = fork(); # we're going to detach from whoever started us
+exit if $pid; # parent dies
+loggit ("Couldn't fork!") unless defined($pid);
+POSIX::setsid() or loggit ("Can't start new session");
+close (STDIN); # never use it anyway
+close (STDOUT) unless $debug;
+close (STDERR) unless $debug;
+$SIG{TERM} = \&signal_handler;
+
+until ($time_to_die)
+{
+ sleep int(rand(31) + 30);  # don't flood network or use too much machine either
+ #turns out we have to sleep first, as we get started before we have an IP
+ # address and a few other things.
+ setupsock() unless $msgsock; # even this has to wait for the DHCP stuff
+ mynetinfo(); # set up/refresh my own net information
+# print LOG ("msg:$msg\n") if $debug;
+ send($msgsock,"$msg",0,$dest) or loggit("send:");
+}
+loggit ("Died on signal:") if $debug;

@@ -1,0 +1,13 @@
+[Unit]
+Description=Weather sensors
+After=network.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=forking
+Restart=always
+ExecStart=/usr/bin/tellem
+IgnoreSIGPIPE=false
+
